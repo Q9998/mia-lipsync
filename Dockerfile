@@ -21,6 +21,8 @@ RUN pip3 install --no-cache-dir numpy opencv-python librosa numba scipy
 RUN python3 -c "import torch; print('cuda_available=', torch.cuda.is_available(), 'version=', torch.version.cuda)" || true
 # Patch for modern librosa API (mel() args are keyword-only now)
 RUN sed -i 's/librosa.filters.mel(hp.sample_rate, hp.n_fft,/librosa.filters.mel(sr=hp.sample_rate, n_fft=hp.n_fft,/' audio.py && grep -n "librosa.filters.mel" audio.py
+# Patch for torch>=2.5: torch.load defaults to weights_only=True, breaks Wav2Lip checkpoint
+RUN sed -i 's/torch\.load(checkpoint_path)/torch.load(checkpoint_path, weights_only=False)/' inference.py && grep -n "weights_only" inference.py
 
 # Wav2Lip checkpoint (~1GB)
 RUN mkdir -p checkpoints && \
