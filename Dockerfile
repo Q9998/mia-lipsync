@@ -13,7 +13,7 @@ WORKDIR /opt
 # Wav2Lip
 RUN git clone https://github.com/Rudrabha/Wav2Lip.git wav2lip
 WORKDIR /opt/wav2lip
-RUN pip3 install --no-cache-dir -r requirements.txt 2>/dev/null || pip3 install --no-cache-dir torch torchvision torchaudio numpy opencv-python librosa numba scipy
+RUN pip3 install --no-cache-dir -r requirements.txt 2>/dev/null || pip3 install --no-cache-dir torch torchvision torchaudio numpy opencv-python "librosa==0.7.2" numba==0.48.0 scipy
 
 # Wav2Lip checkpoint (~1GB)
 RUN mkdir -p checkpoints && \
