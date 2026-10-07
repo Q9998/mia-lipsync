@@ -13,7 +13,9 @@ WORKDIR /opt
 # Wav2Lip
 RUN git clone https://github.com/Rudrabha/Wav2Lip.git wav2lip
 WORKDIR /opt/wav2lip
-RUN pip3 install --no-cache-dir -r requirements.txt 2>/dev/null || pip3 install --no-cache-dir torch torchvision torchaudio numpy opencv-python "librosa==0.7.2" numba==0.48.0 scipy
+RUN pip3 install --no-cache-dir torch torchvision torchaudio numpy opencv-python librosa numba scipy
+# Patch for modern librosa API (mel() args are keyword-only now)
+RUN sed -i 's/librosa.filters.mel(hp.sample_rate, hp.n_fft,/librosa.filters.mel(sr=hp.sample_rate, n_fft=hp.n_fft,/' audio.py && grep -n "librosa.filters.mel" audio.py
 
 # Wav2Lip checkpoint (~1GB)
 RUN mkdir -p checkpoints && \
