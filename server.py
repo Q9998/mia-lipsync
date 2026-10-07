@@ -51,6 +51,18 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/health":
             ckpt = "/opt/wav2lip/checkpoints/wav2lip_gan.pth"
             self._json({"status": "ok", "engines": ["wav2lip"], "checkpoint": os.path.exists(ckpt)})
+        elif p == "/gpu":
+            # GPU 自检：供外部验证 CUDA 是否真正可用
+            try:
+                import torch
+                self._json({
+                    "cuda_available": torch.cuda.is_available(),
+                    "torch_cuda_version": torch.version.cuda,
+                    "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+                    "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+                })
+            except Exception as e:
+                self._json({"cuda_available": False, "error": str(e)})
         elif p.startswith("/status/"):
             jid = p.split("/")[-1]
             self._json(JOBS.get(jid, {"status": "unknown"}))
