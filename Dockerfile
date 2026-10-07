@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV FLICKIES_ENABLE_NONCOMMERCIAL=1
 
 RUN apt-get update && apt-get install -y \
-    python3 python3-pip python3-dev git wget ffmpeg libgl1-mesa-glx \
+    python3 python3-pip python3-dev git wget curl ffmpeg libgl1-mesa-glx \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
