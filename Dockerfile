@@ -26,8 +26,9 @@ RUN sed -i 's/torch\.load(checkpoint_path)/torch.load(checkpoint_path, weights_o
 
 # Wav2Lip checkpoint (~1GB) — 必须下载成功且非空，否则构建失败
 RUN mkdir -p checkpoints && \
-    (wget -q "https://huggingface.co/numz/wav2lip_studio/resolve/main/Wav2Lip/checkpoints/wav2lip_gan.pth" -O checkpoints/wav2lip_gan.pth || \
-     wget -q "https://www.adrianbuluma.com/downloads/python-fan/wav2lip_gan.pth" -O checkpoints/wav2lip_gan.pth) && \
+    (curl -fSL "https://huggingface.co/camenduru/Wav2Lip/resolve/main/checkpoints/wav2lip_gan.pth" -o checkpoints/wav2lip_gan.pth || \
+     curl -fSL "https://huggingface.co/Nekochu/Wav2Lip/resolve/main/wav2lip_gan.pth" -o checkpoints/wav2lip_gan.pth || \
+     curl -fSL "https://huggingface.co/numz/wav2lip_studio/resolve/main/Wav2lip/wav2lip_gan.pth" -o checkpoints/wav2lip_gan.pth) && \
     [ $(stat -c%s checkpoints/wav2lip_gan.pth) -gt 100000000 ] && \
     echo "checkpoint OK: $(stat -c%s checkpoints/wav2lip_gan.pth) bytes"
 
