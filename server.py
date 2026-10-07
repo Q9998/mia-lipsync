@@ -1,11 +1,41 @@
 #!/usr/bin/env python3
-"""Mia 自建口型同步服务：Wav2Lip + GFPGAN，HTTP 接口（支持 base64 上传/下载）"""
-import os, subprocess, json, uuid, base64
+"""Mia 自建口型同步服务：Wav2Lip + GFPGAN，异步任务接口"""
+import os, subprocess, json, uuid, base64, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 WORKDIR = "/tmp/lipsync"
 os.makedirs(WORKDIR, exist_ok=True)
+JOBS = {}
+
+def run_job(job_id, face_b64, audio_b64):
+    JOBS[job_id] = {"status": "processing"}
+    face_path = os.path.join(WORKDIR, f"face-{job_id}.mp4")
+    audio_path = os.path.join(WORKDIR, f"audio-{job_id}.wav")
+    out_path = os.path.join(WORKDIR, f"out-{job_id}.mp4")
+    try:
+        with open(face_path, "wb") as f:
+            f.write(base64.b64decode(face_b64))
+        with open(audio_path, "wb") as f:
+            f.write(base64.b64decode(audio_b64))
+        ckpt = "/opt/wav2lip/checkpoints/wav2lip_gan.pth"
+        tmp = out_path.replace(".mp4", "-wl.mp4")
+        cmd = ["python3", "/opt/wav2lip/inference.py",
+               "--checkpoint_path", ckpt,
+               "--face", face_path, "--audio", audio_path, "--outfile", tmp]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+        if r.returncode != 0:
+            JOBS[job_id] = {"status": "failed", "error": r.stderr[-1000:]}
+            return
+        os.rename(tmp, out_path)
+        with open(out_path, "rb") as f:
+            JOBS[job_id] = {"status": "done", "out_b64": base64.b64encode(f.read()).decode()}
+    except Exception as e:
+        JOBS[job_id] = {"status": "failed", "error": str(e)}
+    finally:
+        for p in (face_path, audio_path, out_path):
+            try: os.remove(p)
+            except: pass
 
 class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
@@ -17,14 +47,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if urlparse(self.path).path == "/health":
-            # 检查 checkpoint 是否存在
+        p = urlparse(self.path).path
+        if p == "/health":
             ckpt = "/opt/wav2lip/checkpoints/wav2lip_gan.pth"
-            self._json({
-                "status": "ok",
-                "engines": ["wav2lip", "gfpgan"],
-                "checkpoint": os.path.exists(ckpt),
-            })
+            self._json({"status": "ok", "engines": ["wav2lip"], "checkpoint": os.path.exists(ckpt)})
+        elif p.startswith("/status/"):
+            jid = p.split("/")[-1]
+            self._json(JOBS.get(jid, {"status": "unknown"}))
         else:
             self._json({"error": "not found"}, 404)
 
@@ -34,53 +63,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", 0))
         req = json.loads(self.rfile.read(length))
-
-        job = uuid.uuid4().hex[:8]
-        face_path = os.path.join(WORKDIR, f"face-{job}.mp4")
-        audio_path = os.path.join(WORKDIR, f"audio-{job}.wav")
-        out_path = os.path.join(WORKDIR, f"out-{job}.mp4")
-
-        try:
-            # 保存上传的文件
-            with open(face_path, "wb") as f:
-                f.write(base64.b64decode(req["face_b64"]))
-            with open(audio_path, "wb") as f:
-                f.write(base64.b64decode(req["audio_b64"]))
-        except Exception as e:
-            self._json({"error": f"decode failed: {e}"}, 400)
-            return
-
-        # 1. Wav2Lip
-        tmp = out_path.replace(".mp4", "-wav2lip.mp4")
-        ckpt = "/opt/wav2lip/checkpoints/wav2lip_gan.pth"
-        if not os.path.exists(ckpt):
-            self._json({"error": "checkpoint missing"}, 500)
-            return
-        cmd = [
-            "python3", "/opt/wav2lip/inference.py",
-            "--checkpoint_path", ckpt,
-            "--face", face_path, "--audio", audio_path, "--outfile", tmp,
-        ]
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        except subprocess.TimeoutExpired:
-            self._json({"error": "wav2lip timeout"}, 500)
-            return
-        if r.returncode != 0:
-            self._json({"error": "wav2lip failed", "log": r.stderr[-2000:]}, 500)
-            return
-
-        # 2. 输出（GFPGAN 可选后处理，暂跳过）
-        os.rename(tmp, out_path)
-        with open(out_path, "rb") as f:
-            out_b64 = base64.b64encode(f.read()).decode()
-
-        # 清理
-        for p in (face_path, audio_path, out_path):
-            try: os.remove(p)
-            except: pass
-
-        self._json({"status": "done", "out_b64": out_b64})
+        jid = uuid.uuid4().hex[:8]
+        t = threading.Thread(target=run_job, args=(jid, req["face_b64"], req["audio_b64"]), daemon=True)
+        t.start()
+        self._json({"status": "accepted", "job_id": jid})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
