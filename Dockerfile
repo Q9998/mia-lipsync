@@ -13,7 +13,9 @@ WORKDIR /opt
 # Wav2Lip
 RUN git clone https://github.com/Rudrabha/Wav2Lip.git wav2lip
 WORKDIR /opt/wav2lip
-RUN pip3 install --no-cache-dir torch torchvision torchaudio numpy opencv-python librosa numba scipy
+# PyTorch with CUDA 11.8 support (NOT cpu-only!)
+RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+RUN pip3 install --no-cache-dir numpy opencv-python librosa numba scipy
 # Patch for modern librosa API (mel() args are keyword-only now)
 RUN sed -i 's/librosa.filters.mel(hp.sample_rate, hp.n_fft,/librosa.filters.mel(sr=hp.sample_rate, n_fft=hp.n_fft,/' audio.py && grep -n "librosa.filters.mel" audio.py
 
