@@ -12,6 +12,28 @@ from urllib.parse import urlparse
 WORKDIR = "/tmp/lipsync"
 os.makedirs(WORKDIR, exist_ok=True)
 JOBS = {}
+# 完成文件的保留时长（秒）：供分片下载，超时由清道夫删除
+RESULT_TTL = 7200
+
+
+def _reaper():
+    """清道夫：删除过期的结果文件"""
+    import time
+    while True:
+        time.sleep(600)
+        now = time.time()
+        for jid, job in list(JOBS.items()):
+            fp = job.get("file")
+            if job.get("status") == "done" and fp and os.path.exists(fp):
+                if now - os.path.getmtime(fp) > RESULT_TTL:
+                    try:
+                        os.remove(fp)
+                    except OSError:
+                        pass
+                    job.pop("file", None)
+
+
+threading.Thread(target=_reaper, daemon=True).start()
 
 WAV2LIP_CKPT = "/opt/wav2lip/checkpoints/wav2lip_gan.pth"
 GFPGAN_CKPT = "/opt/gfpgan/experiments/pretrained_models/GFPGANv1.4.pth"
@@ -108,15 +130,21 @@ def run_job(job_id, face_b64, audio_b64):
         except Exception as e:
             JOBS[job_id] = {"status": "failed", "error": "gfpgan: " + str(e)[:1000]}
             return
-        with open(out_path, "rb") as f:
-            JOBS[job_id] = {"status": "done", "out_b64": base64.b64encode(f.read()).decode(),
-                            "frames_enhanced": n}
+        JOBS[job_id] = {"status": "done", "file": out_path,
+                        "size": os.path.getsize(out_path),
+                        "frames_enhanced": n}
     except Exception as e:
         JOBS[job_id] = {"status": "failed", "error": str(e)}
     finally:
-        for p in (face_path, audio_path, tmp, out_path):
+        # 成功时保留 out_path 供分片下载（清道夫超时清理）；失败/临时文件删掉
+        for p in (face_path, audio_path, tmp):
             try:
                 os.remove(p)
+            except OSError:
+                pass
+        if JOBS.get(job_id, {}).get("status") != "done":
+            try:
+                os.remove(out_path)
             except OSError:
                 pass
 
@@ -132,6 +160,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = urlparse(self.path).path
+        q = urlparse(self.path).query
         if p == "/health":
             self._json({
                 "status": "ok",
@@ -151,6 +180,31 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self._json({"cuda_available": False, "error": str(e)})
+        elif p.startswith("/dl/"):
+            # 分片下载：/dl/<job_id>?off=0&len=1572864，返回 raw 二进制
+            from urllib.parse import parse_qs
+            jid = p.split("/")[-1]
+            job = JOBS.get(jid, {})
+            fp = job.get("file")
+            if job.get("status") != "done" or not fp or not os.path.exists(fp):
+                self._json({"error": "not ready"}, 404)
+                return
+            qs = parse_qs(q)
+            try:
+                off = int(qs.get("off", ["0"])[0])
+                ln = int(qs.get("len", ["1572864"])[0])
+            except ValueError:
+                self._json({"error": "bad range"}, 400)
+                return
+            ln = min(ln, 4 * 1024 * 1024)
+            with open(fp, "rb") as f:
+                f.seek(off)
+                data = f.read(ln)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         elif p.startswith("/status/"):
             jid = p.split("/")[-1]
             self._json(JOBS.get(jid, {"status": "unknown"}))
