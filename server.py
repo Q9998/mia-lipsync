@@ -92,10 +92,13 @@ def run_job(job_id, face_b64, audio_b64):
         with open(audio_path, "wb") as f:
             f.write(base64.b64decode(audio_b64))
         # 1) Wav2Lip 口型生成
+        # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True：防 A4000 上人脸检测时显存碎片 OOM
+        wl_env = dict(os.environ)
+        wl_env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
         cmd = ["python3", "/opt/wav2lip/inference.py",
                "--checkpoint_path", WAV2LIP_CKPT,
                "--face", face_path, "--audio", audio_path, "--outfile", tmp]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1200, env=wl_env)
         if r.returncode != 0:
             JOBS[job_id] = {"status": "failed", "error": "wav2lip: " + r.stderr[-1000:]}
             return
