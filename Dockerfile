@@ -36,7 +36,12 @@ RUN mkdir -p checkpoints && \
 WORKDIR /opt
 RUN git clone https://github.com/TencentARC/GFPGAN.git gfpgan
 WORKDIR /opt/gfpgan
-RUN pip3 install --no-cache-dir -r requirements.txt 2>/dev/null || pip3 install --no-cache-dir basicsr facexlib gfpgan
+# 注意：requirements.txt 里没有 gfpgan 本体（以前用 || 导致本体从未被安装，
+# 线上曾报 No module named 'gfpgan'）。这里分两步，保证本体一定装上：
+RUN pip3 install --no-cache-dir basicsr facexlib || true
+RUN pip3 install --no-cache-dir --no-deps .
+# 构建时自检：gfpgan 必须可 import，否则直接失败
+RUN python3 -c "import gfpgan; print('gfpgan import OK')"
 
 # GFPGAN v1.4 权重（~350MB）：构建时下载 + 非空校验，server.py 启动时不再依赖现场下载
 RUN mkdir -p experiments/pretrained_models && \
