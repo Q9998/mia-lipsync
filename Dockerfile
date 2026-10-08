@@ -39,9 +39,11 @@ WORKDIR /opt/gfpgan
 # 注意：requirements.txt 里没有 gfpgan 本体（以前用 || 导致本体从未被安装，
 # 线上曾报 No module named 'gfpgan'）。这里分两步，保证本体一定装上：
 RUN pip3 install --no-cache-dir basicsr facexlib || true
+# basicsr 1.4.2 与 torchvision>=0.20 不兼容（functional_tensor 已被移除），打补丁
+RUN grep -rl "torchvision\.transforms\.functional_tensor" $(python3 -c "import site; print(site.getsitepackages()[0])")/basicsr/ 2>/dev/null | xargs -r sed -i 's/torchvision\.transforms\.functional_tensor/torchvision.transforms.functional/g'
 RUN pip3 install --no-cache-dir --no-deps .
 # 构建时自检：gfpgan 必须可 import，否则直接失败
-RUN python3 -c "import gfpgan; print('gfpgan import OK')"
+RUN python3 -c "from gfpgan import GFPGANer; print('gfpgan import OK')"
 
 # GFPGAN v1.4 权重（~350MB）：构建时下载 + 非空校验，server.py 启动时不再依赖现场下载
 RUN mkdir -p experiments/pretrained_models && \
