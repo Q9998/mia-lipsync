@@ -38,6 +38,13 @@ RUN git clone https://github.com/TencentARC/GFPGAN.git gfpgan
 WORKDIR /opt/gfpgan
 RUN pip3 install --no-cache-dir -r requirements.txt 2>/dev/null || pip3 install --no-cache-dir basicsr facexlib gfpgan
 
+# GFPGAN v1.4 权重（~350MB）：构建时下载 + 非空校验，server.py 启动时不再依赖现场下载
+RUN mkdir -p experiments/pretrained_models && \
+    curl -fSL "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth" \
+      -o experiments/pretrained_models/GFPGANv1.4.pth && \
+    [ $(stat -c%s experiments/pretrained_models/GFPGANv1.4.pth) -gt 100000000 ] && \
+    echo "GFPGAN weights OK: $(stat -c%s experiments/pretrained_models/GFPGANv1.4.pth) bytes"
+
 WORKDIR /opt/wav2lip
 EXPOSE 8000
 

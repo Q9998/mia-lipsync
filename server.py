@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Mia 自建口型同步服务：Wav2Lip + GFPGAN，异步任务接口"""
+"""Mia 自建口型同步服务：Wav2Lip + GFPGAN，异步任务接口
+
+链路：Wav2Lip 生成口型 -> GFPGAN 逐帧人脸修复（paste_back，只动人脸）
+      -> ffmpeg 把原音频 mux 回来。GFPGAN 是画质/嘴部修复的关键一步，
+      之前版本缺了它，直接导致"方块模糊嘴"。
+"""
 import os, subprocess, json, uuid, base64, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
@@ -8,34 +13,110 @@ WORKDIR = "/tmp/lipsync"
 os.makedirs(WORKDIR, exist_ok=True)
 JOBS = {}
 
+WAV2LIP_CKPT = "/opt/wav2lip/checkpoints/wav2lip_gan.pth"
+GFPGAN_CKPT = "/opt/gfpgan/experiments/pretrained_models/GFPGANv1.4.pth"
+GFPGAN_URL = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth"
+
+_gfpgan_restorer = None
+_restorer_lock = threading.Lock()
+
+
+def get_restorer():
+    """懒加载 GFPGAN（首次调用时初始化；权重缺失则现场下载）"""
+    global _gfpgan_restorer
+    if _gfpgan_restorer is None:
+        with _restorer_lock:
+            if _gfpgan_restorer is None:
+                if not os.path.exists(GFPGAN_CKPT) or os.path.getsize(GFPGAN_CKPT) < 100_000_000:
+                    os.makedirs(os.path.dirname(GFPGAN_CKPT), exist_ok=True)
+                    print("downloading GFPGAN weights...", flush=True)
+                    subprocess.run(["curl", "-fSL", GFPGAN_URL, "-o", GFPGAN_CKPT],
+                                   check=True, timeout=900)
+                from gfpgan import GFPGANer
+                _gfpgan_restorer = GFPGANer(
+                    model_path=GFPGAN_CKPT,
+                    upscale=1, arch="clean", channel_multiplier=2,
+                    bg_upsampler=None)
+                print("GFPGAN restorer ready", flush=True)
+    return _gfpgan_restorer
+
+
+def gfpgan_enhance(src_mp4, dst_mp4):
+    """逐帧 GFPGAN 人脸修复，完成后把原音频 mux 回来。返回处理的帧数。"""
+    import cv2
+    restorer = get_restorer()
+    cap = cv2.VideoCapture(src_mp4)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    tmp_v = dst_mp4.replace(".mp4", "-nov.mp4")
+    vw = cv2.VideoWriter(tmp_v, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    n = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        try:
+            _, _, restored = restorer.enhance(
+                frame, has_aligned=False, only_center_face=False, paste_back=True)
+        except Exception:
+            restored = None
+        vw.write(restored if restored is not None else frame)
+        n += 1
+    cap.release()
+    vw.release()
+    if n == 0:
+        raise RuntimeError("gfpgan: no frames read from " + src_mp4)
+    cmd = ["ffmpeg", "-y", "-i", tmp_v, "-i", src_mp4,
+           "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "18",
+           "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0?", "-shortest", dst_mp4]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    try:
+        os.remove(tmp_v)
+    except OSError:
+        pass
+    if r.returncode != 0 or not os.path.exists(dst_mp4):
+        raise RuntimeError("ffmpeg mux failed: " + r.stderr[-500:])
+    return n
+
+
 def run_job(job_id, face_b64, audio_b64):
     JOBS[job_id] = {"status": "processing"}
     face_path = os.path.join(WORKDIR, f"face-{job_id}.mp4")
     audio_path = os.path.join(WORKDIR, f"audio-{job_id}.wav")
     out_path = os.path.join(WORKDIR, f"out-{job_id}.mp4")
+    tmp = out_path.replace(".mp4", "-wl.mp4")
     try:
         with open(face_path, "wb") as f:
             f.write(base64.b64decode(face_b64))
         with open(audio_path, "wb") as f:
             f.write(base64.b64decode(audio_b64))
-        ckpt = "/opt/wav2lip/checkpoints/wav2lip_gan.pth"
-        tmp = out_path.replace(".mp4", "-wl.mp4")
+        # 1) Wav2Lip 口型生成
         cmd = ["python3", "/opt/wav2lip/inference.py",
-               "--checkpoint_path", ckpt,
+               "--checkpoint_path", WAV2LIP_CKPT,
                "--face", face_path, "--audio", audio_path, "--outfile", tmp]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
         if r.returncode != 0:
-            JOBS[job_id] = {"status": "failed", "error": r.stderr[-1000:]}
+            JOBS[job_id] = {"status": "failed", "error": "wav2lip: " + r.stderr[-1000:]}
             return
-        os.rename(tmp, out_path)
+        # 2) GFPGAN 人脸修复（修嘴部模糊/方块嘴，保画质）——之前缺的就是这一步
+        try:
+            n = gfpgan_enhance(tmp, out_path)
+        except Exception as e:
+            JOBS[job_id] = {"status": "failed", "error": "gfpgan: " + str(e)[:1000]}
+            return
         with open(out_path, "rb") as f:
-            JOBS[job_id] = {"status": "done", "out_b64": base64.b64encode(f.read()).decode()}
+            JOBS[job_id] = {"status": "done", "out_b64": base64.b64encode(f.read()).decode(),
+                            "frames_enhanced": n}
     except Exception as e:
         JOBS[job_id] = {"status": "failed", "error": str(e)}
     finally:
-        for p in (face_path, audio_path, out_path):
-            try: os.remove(p)
-            except: pass
+        for p in (face_path, audio_path, tmp, out_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
 
 class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
@@ -49,8 +130,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = urlparse(self.path).path
         if p == "/health":
-            ckpt = "/opt/wav2lip/checkpoints/wav2lip_gan.pth"
-            self._json({"status": "ok", "engines": ["wav2lip"], "checkpoint": os.path.exists(ckpt)})
+            self._json({
+                "status": "ok",
+                "engines": ["wav2lip", "gfpgan"],
+                "wav2lip_checkpoint": os.path.exists(WAV2LIP_CKPT),
+                "gfpgan_weights": os.path.exists(GFPGAN_CKPT),
+            })
         elif p == "/gpu":
             # GPU 自检：供外部验证 CUDA 是否真正可用
             try:
@@ -79,6 +164,7 @@ class Handler(BaseHTTPRequestHandler):
         t = threading.Thread(target=run_job, args=(jid, req["face_b64"], req["audio_b64"]), daemon=True)
         t.start()
         self._json({"status": "accepted", "job_id": jid})
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
